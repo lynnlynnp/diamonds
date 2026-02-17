@@ -68,3 +68,7 @@ Diamonds stores your data in a simple JSON file located at:
 - **Windows**: `%APPDATA%\diamonds\data.json`
 
 You can manually back up or edit this file if needed.
+
+## ACKNOWLEDGMENTS
+
+A massive shoutout to [Charmbracelet](https://charm.sh/) whose work not only supports a huge chunk of this project but also inspired it to begin with 💖
