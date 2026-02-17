@@ -107,71 +107,74 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- UPDATE LOGIC HANDLERS ---
 
 func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Global keys
+	if msg.String() == "ctrl+c" || msg.String() == "q" {
+		return m, tea.Quit
+	}
+
+	// Trigger search
 	if msg.String() == "/" && m.projectList.FilterState() == list.Unfiltered {
 		m.switchToSearchItems()
 	}
 
-	if m.projectList.FilterState() == list.Filtering {
-		var cmd tea.Cmd
-		m.projectList, cmd = m.projectList.Update(msg)
-		if m.projectList.FilterState() == list.Unfiltered {
-			m.updateProjectListItems()
-		}
-		return m, cmd
-	}
+	// Application keys (only when not filtering)
+	if m.projectList.FilterState() == list.Unfiltered {
+		switch msg.String() {
+		case "esc":
+			// No-op here because if we are Unfiltered, we don't need to reset filter.
+		case "enter":
+			selectedItem := m.projectList.SelectedItem()
+			if selectedItem == nil {
+				return m, nil
+			}
 
-	switch msg.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc":
-		if m.projectList.FilterState() != list.Unfiltered {
-			m.projectList.ResetFilter()
-			m.updateProjectListItems()
+			switch item := selectedItem.(type) {
+			case *projectItem:
+				for i, p := range m.projects {
+					if p.Name == item.project.Name {
+						m.selectedProject = i
+						m.currentView = ProjectMenuView
+						m.cursor = 0
+						break
+					}
+				}
+			case *colorItem:
+				clipboard.WriteAll(item.color)
+				m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.color)
+			case *urlItem:
+				clipboard.WriteAll(item.url.URL)
+				m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.url.URL)
+			}
 			return m, nil
-		}
-	case "enter":
-		selectedItem := m.projectList.SelectedItem()
-		if selectedItem == nil {
+		case "n":
+			m.currentView = AddProjectView
+			m.inputBuffer = ""
 			return m, nil
-		}
-
-		switch item := selectedItem.(type) {
-		case *projectItem:
-			for i, p := range m.projects {
-				if p.Name == item.project.Name {
-					m.selectedProject = i
-					m.currentView = ProjectMenuView
-					m.cursor = 0
-					break
+		case "d":
+			selectedItem, ok := m.projectList.SelectedItem().(*projectItem)
+			if ok {
+				for i, p := range m.projects {
+					if p.Name == selectedItem.project.Name {
+						m.selectedProject = i
+						m.currentView = ConfirmDeleteProjectView
+						break
+					}
 				}
 			}
-		case *colorItem:
-			clipboard.WriteAll(item.color)
-			m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.color)
-		case *urlItem:
-			clipboard.WriteAll(item.url.URL)
-			m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.url.URL)
+			return m, nil
 		}
-		return m, nil
-	case "n":
-		m.currentView = AddProjectView
-		m.inputBuffer = ""
-		return m, nil
-	case "d":
-		selectedItem, ok := m.projectList.SelectedItem().(*projectItem)
-		if ok {
-			for i, p := range m.projects {
-				if p.Name == selectedItem.project.Name {
-					m.selectedProject = i
-					m.currentView = ConfirmDeleteProjectView
-					break
-				}
-			}
-		}
-		return m, nil
 	}
+
+	wasFiltering := m.projectList.FilterState() == list.Filtering
+
 	var cmd tea.Cmd
 	m.projectList, cmd = m.projectList.Update(msg)
+
+	// If we just stopped filtering (e.g. user pressed Esc), restore project items
+	if wasFiltering && m.projectList.FilterState() == list.Unfiltered {
+		m.updateProjectListItems()
+	}
+
 	return m, cmd
 }
 
