@@ -111,7 +111,7 @@ func (m *model) View() string {
 func (m *model) viewProjectList() string {
 	var b strings.Builder
 	b.WriteString(m.projectList.View())
-	help := horizontalHelp("↑/↓ navigate", "n new", "d delete", "q quit")
+	help := horizontalHelp("↑/↓ navigate", "/ search", "n new", "d delete", "q quit")
 	b.WriteString("\n" + help)
 
 	if m.message != "" {

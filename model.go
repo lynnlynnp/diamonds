@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 )
@@ -29,24 +30,55 @@ type Project struct {
 
 // projectItem adapts Project to the list.Item interface required by bubbles/list
 type projectItem struct {
-	name       string
-	colorCount int
-	urlCount   int
+	project Project
 }
 
-func (p projectItem) FilterValue() string { return p.name }
-func (p projectItem) Title() string       { return p.name }
-func (p projectItem) Description() string {
+func (p *projectItem) FilterValue() string {
+	var b strings.Builder
+	b.WriteString(p.project.Name)
+	for _, c := range p.project.Colors {
+		b.WriteString(" " + c)
+	}
+	for _, u := range p.project.Urls {
+		b.WriteString(" " + u.Name)
+	}
+	return b.String()
+}
+
+func (p *projectItem) Title() string { return p.project.Name }
+func (p *projectItem) Description() string {
+	colorCount := len(p.project.Colors)
+	urlCount := len(p.project.Urls)
 	colorStr := "colors"
-	if p.colorCount == 1 {
+	if colorCount == 1 {
 		colorStr = "color"
 	}
 	urlStr := "URLs"
-	if p.urlCount == 1 {
+	if urlCount == 1 {
 		urlStr = "URL"
 	}
-	return fmt.Sprintf("%d %s, %d %s", p.colorCount, colorStr, p.urlCount, urlStr)
+	return fmt.Sprintf("%d %s, %d %s", colorCount, colorStr, urlCount, urlStr)
 }
+
+// --- LIST ADAPTER (Color & URL) ---
+
+type colorItem struct {
+	color   string
+	project string
+}
+
+func (c *colorItem) FilterValue() string { return c.color + " " + c.project }
+func (c *colorItem) Title() string       { return c.color }
+func (c *colorItem) Description() string { return fmt.Sprintf("Color in %s", c.project) }
+
+type urlItem struct {
+	url     namedURL
+	project string
+}
+
+func (u *urlItem) FilterValue() string { return u.url.Name + " " + u.url.URL + " " + u.project }
+func (u *urlItem) Title() string       { return u.url.Name }
+func (u *urlItem) Description() string { return fmt.Sprintf("%s • %s", u.url.URL, u.project) }
 
 // --- FILE I/O ---
 
@@ -110,7 +142,20 @@ func (m *model) saveProjects() {
 func (m *model) updateProjectListItems() {
 	items := make([]list.Item, len(m.projects))
 	for i, project := range m.projects {
-		items[i] = projectItem{name: project.Name, colorCount: len(project.Colors), urlCount: len(project.Urls)}
+		items[i] = &projectItem{project: project}
+	}
+	m.projectList.SetItems(items)
+}
+
+func (m *model) switchToSearchItems() {
+	var items []list.Item
+	for _, p := range m.projects {
+		for _, c := range p.Colors {
+			items = append(items, &colorItem{color: c, project: p.Name})
+		}
+		for _, u := range p.Urls {
+			items = append(items, &urlItem{url: u, project: p.Name})
+		}
 	}
 	m.projectList.SetItems(items)
 }

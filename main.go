@@ -44,14 +44,14 @@ func initialModel() model {
 
 	items := make([]list.Item, len(loadedProjects))
 	for i, project := range loadedProjects {
-		items[i] = projectItem{name: project.Name, colorCount: len(project.Colors), urlCount: len(project.Urls)}
+		items[i] = &projectItem{project: project}
 	}
 
 	delegate := newCustomDelegate()
 	l := list.New(items, delegate, 0, 0)
 	l.Title = "🪩 DIAMONDS "
 	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
+	l.SetFilteringEnabled(true)
 	l.Styles.Title = headerStyle.MarginTop(0).PaddingTop(1)
 	l.Styles.HelpStyle = helpStyle
 	l.SetShowHelp(false)
@@ -107,20 +107,50 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // --- UPDATE LOGIC HANDLERS ---
 
 func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "/" && m.projectList.FilterState() == list.Unfiltered {
+		m.switchToSearchItems()
+	}
+
+	if m.projectList.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		m.projectList, cmd = m.projectList.Update(msg)
+		if m.projectList.FilterState() == list.Unfiltered {
+			m.updateProjectListItems()
+		}
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		return m, tea.Quit
+	case "esc":
+		if m.projectList.FilterState() != list.Unfiltered {
+			m.projectList.ResetFilter()
+			m.updateProjectListItems()
+			return m, nil
+		}
 	case "enter":
-		selectedItem, ok := m.projectList.SelectedItem().(projectItem)
-		if ok {
+		selectedItem := m.projectList.SelectedItem()
+		if selectedItem == nil {
+			return m, nil
+		}
+
+		switch item := selectedItem.(type) {
+		case *projectItem:
 			for i, p := range m.projects {
-				if p.Name == selectedItem.name {
+				if p.Name == item.project.Name {
 					m.selectedProject = i
 					m.currentView = ProjectMenuView
 					m.cursor = 0
 					break
 				}
 			}
+		case *colorItem:
+			clipboard.WriteAll(item.color)
+			m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.color)
+		case *urlItem:
+			clipboard.WriteAll(item.url.URL)
+			m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.url.URL)
 		}
 		return m, nil
 	case "n":
@@ -128,10 +158,10 @@ func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputBuffer = ""
 		return m, nil
 	case "d":
-		selectedItem, ok := m.projectList.SelectedItem().(projectItem)
+		selectedItem, ok := m.projectList.SelectedItem().(*projectItem)
 		if ok {
 			for i, p := range m.projects {
-				if p.Name == selectedItem.name {
+				if p.Name == selectedItem.project.Name {
 					m.selectedProject = i
 					m.currentView = ConfirmDeleteProjectView
 					break
