@@ -1,122 +1,17 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
-const dataFileName = "data.json"
-const configDirName = "diamonds"
-
-func getDataFilePath() (string, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("could not get user config dir: %w", err)
-	}
-
-	appConfigDir := filepath.Join(configDir, configDirName)
-	if err := os.MkdirAll(appConfigDir, 0755); err != nil {
-		return "", fmt.Errorf("could not create app config dir: %w", err)
-	}
-
-	return filepath.Join(appConfigDir, dataFileName), nil
-}
-
-func (m *model) saveProjects() {
-	path, err := getDataFilePath()
-	if err != nil {
-		m.message = fmt.Sprintf("Error getting data path: %v", err)
-		return
-	}
-
-	data, err := json.MarshalIndent(m.projects, "", "  ")
-	if err != nil {
-		m.message = fmt.Sprintf("Error saving data: %v", err)
-		return
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		m.message = fmt.Sprintf("Error writing data: %v", err)
-	}
-}
-
-func loadProjects() ([]Project, error) {
-	path, err := getDataFilePath()
-	if err != nil {
-		return nil, fmt.Errorf("could not get data file path: %w", err)
-	}
-
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return []Project{}, nil // No file, start fresh
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("could not read data file: %w", err)
-	}
-
-	var projects []Project
-	if err := json.Unmarshal(data, &projects); err != nil {
-		return nil, fmt.Errorf("could not parse data file: %w", err)
-	}
-
-	return projects, nil
-}
-
-// ViewState determines which view is currently active.
-type ViewState int
-
-const (
-	ProjectListView ViewState = iota
-	ColorListView
-	AddProjectView
-	AddColorView
-	UrlListView
-	AddUrlView
-	ProjectMenuView
-	ConfirmDeleteProjectView
-)
-
-// --- LIST ITEM (Project) ---
-type projectItem struct {
-	name       string
-	colorCount int
-	urlCount   int
-}
-
-func (p projectItem) FilterValue() string { return p.name }
-func (p projectItem) Title() string       { return p.name }
-func (p projectItem) Description() string {
-	colorStr := "colors"
-	if p.colorCount == 1 {
-		colorStr = "color"
-	}
-	urlStr := "URLs"
-	if p.urlCount == 1 {
-		urlStr = "URL"
-	}
-	return fmt.Sprintf("%d %s, %d %s", p.colorCount, colorStr, p.urlCount, urlStr)
-}
-
-// --- MODEL ---
-type namedURL struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-}
-
-type Project struct {
-	Name   string     `json:"name"`
-	Colors []string   `json:"colors"`
-	Urls   []namedURL `json:"urls"`
-}
+// --- MAIN STATE MODEL ---
 
 type model struct {
 	projectList     list.Model
@@ -130,86 +25,15 @@ type model struct {
 	message         string
 }
 
-// --- STYLING PARAMETERS ---
-var (
-	// Pipe: Adaptive purple for app name/header
-	appNameColor = lipgloss.AdaptiveColor{Light: "#1E90FF", Dark: "#F6FFFE"}
-	// Comment: Gray text for secondary info
-	commentColor = lipgloss.Color("#757575")
-	// Flag: Adaptive color for selected items
-	selectionColor = lipgloss.AdaptiveColor{Light: "#0000CD", Dark: "#BAF3EB"}
-	itemDescColor = lipgloss.AdaptiveColor{Light: "#5151D8", Dark: "#E9F8F5"}
-	// ErrorHeader: Used for status messages
-	messageColor   = lipgloss.Color("#F1F1F1")
-	messageBgColor = lipgloss.Color("#FF5F87")
-	// InlineCode: Pink on a dark/light background
-	inlineCodeColor   = lipgloss.Color("#FF5F87")
-	inlineCodeBgColor = lipgloss.AdaptiveColor{Light: "#ADD8E6", Dark: "#3A3A3A"}
-	// Quote: Adaptive pink for interactive elements
-	quoteColor = lipgloss.AdaptiveColor{Light: "#1E90FF", Dark: "#FF59C8"}
-	// Normal: For regular text
-	normalTextColor = lipgloss.AdaptiveColor{Light: "#1F2026", Dark: "#E5E5E5"}
+// --- HELPER FUNCTIONS ---
 
-	// Styles built from the color parameters
-	// AppName + Pipe
-	headerStyle = lipgloss.NewStyle().
-			Foreground(appNameColor).
-			Bold(true).
-			MarginBottom(1)
-
-	// Comment
-	helpStyle = lipgloss.NewStyle().
-			Foreground(commentColor)
-
-	subtleStyle = lipgloss.NewStyle().
-			Foreground(commentColor)
-
-	// ErrorHeader
-	messageStyle = lipgloss.NewStyle().
-			Foreground(messageColor).
-			Background(messageBgColor).
-			Bold(true).
-			Padding(0, 1)
-
-	// InlineCode
-	inlineCodeStyle = lipgloss.NewStyle().
-			Foreground(inlineCodeColor).
-			Background(inlineCodeBgColor).
-			Padding(0, 1).
-			Bold(true)
-
-	// Flag
-	selectedItemStyle = lipgloss.NewStyle().
-				Foreground(selectionColor)
-
-	// Quote
-	inputStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(quoteColor).
-			Padding(1, 2).
-			Width(40)
-
-	// Doc: General styling for the whole app
-	docStyle = lipgloss.NewStyle().Padding(2,1).Foreground(normalTextColor)
-)
-
-func newCustomDelegate() list.DefaultDelegate {  
-	// Create a new default delegate  
-	d := list.NewDefaultDelegate()  
-  
-	// Change colors (using your selection color)  
-	c := selectionColor  
-	d.Styles.SelectedTitle = d.Styles.SelectedTitle.Foreground(c).BorderLeftForeground(c)  
-	d.Styles.SelectedDesc = d.Styles.SelectedDesc.Foreground(itemDescColor).BorderLeftForeground(c) // Add BorderLeftForeground  
-  
-	// Set color for normal (unselected) items  
-	d.Styles.NormalTitle = d.Styles.NormalTitle.Foreground(normalTextColor)  
-	d.Styles.NormalDesc = d.Styles.NormalDesc.Foreground(commentColor)  
-  
-	return d  
+// deleteLastRune removes the last character from a string, handling unicode characters correctly.
+func deleteLastRune(s string) string {
+	_, size := utf8.DecodeLastRuneInString(s)
+	return s[:len(s)-size]
 }
 
-// --- INITIALIZATION & UPDATE LOGIC ---
+// --- INITIALIZATION ---
 
 func initialModel() model {
 	loadedProjects, err := loadProjects()
@@ -239,17 +63,11 @@ func initialModel() model {
 	}
 }
 
-func (m *model) updateProjectListItems() {
-	items := make([]list.Item, len(m.projects))
-	for i, project := range m.projects {
-		items[i] = projectItem{name: project.Name, colorCount: len(project.Colors), urlCount: len(project.Urls)}
-	}
-	m.projectList.SetItems(items)
-}
-
 func (m *model) Init() tea.Cmd {
 	return nil
 }
+
+// --- UPDATE LOOP ---
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Clear the message on any key press
@@ -285,6 +103,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+// --- UPDATE LOGIC HANDLERS ---
 
 func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -365,7 +185,7 @@ func (m *model) updateColorList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cursor++
 		}
 	case "enter":
-				if len(m.projects[m.selectedProject].Colors) > 0 {
+		if len(m.projects[m.selectedProject].Colors) > 0 {
 			color := m.projects[m.selectedProject].Colors[m.cursor]
 			err := clipboard.WriteAll(color)
 			if err != nil {
@@ -454,9 +274,7 @@ func (m *model) updateAddProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputBuffer = ""
 		}
 	case "backspace":
-		if len(m.inputBuffer) > 0 {
-			m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
-		}
+		m.inputBuffer = deleteLastRune(m.inputBuffer)
 	case " ":
 		m.inputBuffer += " "
 	default:
@@ -484,9 +302,7 @@ func (m *model) updateAddColor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.inputBuffer = ""
 		}
 	case "backspace":
-		if len(m.inputBuffer) > 0 {
-			m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
-		}
+		m.inputBuffer = deleteLastRune(m.inputBuffer)
 	default:
 		if msg.Type == tea.KeyRunes && len(m.inputBuffer) < 7 {
 			m.inputBuffer += string(msg.Runes)
@@ -521,13 +337,9 @@ func (m *model) updateAddUrl(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "backspace":
 		if m.focusedField == 0 {
-			if len(m.urlNameBuffer) > 0 {
-				m.urlNameBuffer = m.urlNameBuffer[:len(m.urlNameBuffer)-1]
-			}
+			m.urlNameBuffer = deleteLastRune(m.urlNameBuffer)
 		} else {
-			if len(m.inputBuffer) > 0 {
-				m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
-			}
+			m.inputBuffer = deleteLastRune(m.inputBuffer)
 		}
 	case "tab":
 		m.focusedField = (m.focusedField + 1) % 2
@@ -549,55 +361,6 @@ func (m *model) updateAddUrl(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// --- VIEWS ---
-
-func (m *model) View() string {
-	var view string
-	switch m.currentView {
-	case ProjectListView:
-		view = m.viewProjectList()
-	case ProjectMenuView:
-		view = m.viewProjectMenu()
-	case ColorListView:
-		view = m.viewColorList()
-	case UrlListView:
-		view = m.viewUrlList()
-	case AddProjectView:
-		view = m.viewAddProject()
-	case AddColorView:
-		view = m.viewAddColor()
-	case AddUrlView:
-		view = m.viewAddUrl()
-	case ConfirmDeleteProjectView:
-		view = m.viewConfirmDeleteProject()
-	}
-	return docStyle.Render(view)
-}
-
-func (m *model) viewProjectList() string {
-	var b strings.Builder
-	b.WriteString(m.projectList.View())
-	help := horizontalHelp("↑/↓ navigate", "n new", "d delete", "q quit")
-	b.WriteString("\n" + help)
-
-	if m.message != "" {
-		b.WriteString("\n" + messageStyle.Render(m.message))
-	}
-	return b.String()
-}
-
-func (m *model) viewConfirmDeleteProject() string {
-	projectName := ""
-	if m.selectedProject >= 0 && m.selectedProject < len(m.projects) {
-		projectName = m.projects[m.selectedProject].Name
-	}
-	var b strings.Builder
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Delete '%s'?", projectName)) + "\n\n")
-	b.WriteString("Are you sure? This action cannot be undone.\n\n")
-	b.WriteString(horizontalHelp("y yes", "n no", "esc cancel"))
-	return b.String()
-}
-
 func (m *model) updateConfirmDeleteProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
@@ -615,139 +378,7 @@ func (m *model) updateConfirmDeleteProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
-
-func (m *model) viewProjectMenu() string {  
-    project := m.projects[m.selectedProject]  
-    var b strings.Builder  
-  
-    b.WriteString(headerStyle.Render("✨ " + project.Name) + "\n")  
-  
-    options := []string{"Colors", "URLs"}  
-    for i, option := range options {  
-        if m.cursor == i {  
-            b.WriteString(selectedItemStyle.Render("> " + option) + "\n")  
-        } else {  
-            b.WriteString("  " + option + "\n")  // Ensure exactly 2 spaces  
-        }  
-    }  
-  
-    help := horizontalHelp("↑/↓ navigate", "enter select", "esc back", "q quit")  
-    b.WriteString("\n" + help)  
-  
-    return b.String()  
-}
-
-func (m *model) viewColorList() string {
-	project := m.projects[m.selectedProject]
-	var b strings.Builder
-
-	b.WriteString(headerStyle.Render(project.Name) + "\n")
-
-	if len(project.Colors) == 0 {
-		b.WriteString(subtleStyle.Render("No colors yet. Press 'n' to add one.") + "\n")
-	} else {
-		for i, color := range project.Colors {
-			// The unused 'cursor' and 'style' variables have been removed.
-
-			colorBlock := lipgloss.NewStyle().Background(lipgloss.Color(color)).Render("  ")
-			hexCodeStyled := inlineCodeStyle.Render(color)
-			line := fmt.Sprintf("%s %s", colorBlock, hexCodeStyled)
-
-			if m.cursor == i {
-				// Style for the cursor: colored but NOT bold
-				cursorStyle := lipgloss.NewStyle().Foreground(selectionColor)
-				styledCursor := cursorStyle.Render("> ")
-
-				// Style for the line: uses the existing bold and colored style
-				styledLine := selectedItemStyle.Render(line)
-
-				b.WriteString(styledCursor + styledLine + "\n")
-			} else {
-				// For unselected lines, just add padding
-				b.WriteString("  " + line + "\n")
-			}
-		}
-	}
-
-	help := horizontalHelp("↑/↓ navigate", "enter copy", "n new", "d delete", "esc back", "q quit")
-	b.WriteString("\n" + help)
-
-	if m.message != "" {
-		b.WriteString("\n" + messageStyle.Render(m.message))
-	}
-
-	return b.String()
-}
-
-func (m *model) viewUrlList() string {
-	project := m.projects[m.selectedProject]
-	var b strings.Builder
-
-	b.WriteString(headerStyle.Render(project.Name) + "\n")
-
-	if len(project.Urls) == 0 {
-		b.WriteString(subtleStyle.Render("No URLs yet. Press 'n' to add one.") + "\n")
-	} else {
-		for i, namedUrl := range project.Urls {
-			if m.cursor == i {
-				b.WriteString(selectedItemStyle.Render("> " + namedUrl.Name) + "\n")
-			} else {
-				b.WriteString("  " + namedUrl.Name + "\n")
-			}
-		}
-	}
-
-	help := horizontalHelp("↑/↓ navigate", "enter copy", "n new", "d delete", "esc back", "q quit")
-	b.WriteString("\n" + help)
-
-	if m.message != "" {
-		b.WriteString("\n" + messageStyle.Render(m.message))
-	}
-
-	return b.String()
-}
-
-func (m *model) viewAddProject() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Add New Project") + "\n")
-	prompt := fmt.Sprintf("Project name: %s", m.inputBuffer)
-	b.WriteString(inputStyle.Render(prompt) + "\n\n")
-	b.WriteString(horizontalHelp("enter save", "esc cancel"))
-	return b.String()
-}
-
-func (m *model) viewAddColor() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Add New Color") + "\n")
-	prompt := fmt.Sprintf("HEX color: %s", m.inputBuffer)
-	b.WriteString(inputStyle.Render(prompt) + "\n\n")
-	b.WriteString(helpStyle.Render("Enter HEX (e.g., #FF5F87)") + "\n")
-	b.WriteString(horizontalHelp("enter save", "esc cancel"))
-	return b.String()
-}
-
-func (m *model) viewAddUrl() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Add New URL") + "\n")
-
-	namePrompt := fmt.Sprintf("Name: %s", m.urlNameBuffer)
-	urlPrompt := fmt.Sprintf("URL: %s", m.inputBuffer)
-
-	if m.focusedField == 0 {
-		b.WriteString(inputStyle.Render(namePrompt) + "\n")
-		b.WriteString(subtleStyle.Render(urlPrompt) + "\n\n")
-	} else {
-		b.WriteString(subtleStyle.Render(namePrompt) + "\n")
-		b.WriteString(inputStyle.Render(urlPrompt) + "\n\n")
-	}
-
-	b.WriteString(horizontalHelp("enter next/save", "tab switch fields", "esc cancel"))
-	return b.String()
-}
-
-func horizontalHelp(keys ...string) string {
-	return helpStyle.Render(strings.Join(keys, " • "))
-}
+// --- ENTRY POINT ---
 
 func main() {
 	m := initialModel()
