@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 const dataFileName = "data.json"
@@ -139,15 +140,15 @@ func (m *model) saveProjects() {
 	}
 }
 
-func (m *model) updateProjectListItems() {
+func (m *model) updateProjectListItems() tea.Cmd {
 	items := make([]list.Item, len(m.projects))
 	for i, project := range m.projects {
 		items[i] = &projectItem{project: project}
 	}
-	m.projectList.SetItems(items)
+	return m.projectList.SetItems(items)
 }
 
-func (m *model) switchToSearchItems() {
+func (m *model) switchToSearchItems() tea.Cmd {
 	var items []list.Item
 	for _, p := range m.projects {
 		for _, c := range p.Colors {
@@ -157,5 +158,5 @@ func (m *model) switchToSearchItems() {
 			items = append(items, &urlItem{url: u, project: p.Name})
 		}
 	}
-	m.projectList.SetItems(items)
+	return m.projectList.SetItems(items)
 }

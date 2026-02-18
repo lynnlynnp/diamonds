@@ -78,6 +78,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.WindowSizeMsg); ok {
 		h, v := docStyle.GetHorizontalPadding(), docStyle.GetVerticalPadding()
 		m.projectList.SetSize(msg.Width-h, msg.Height-v)
+		return m, nil
 	}
 
 	switch msg := msg.(type) {
@@ -101,12 +102,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirmDeleteProject(msg)
 		}
 	}
-	return m, nil
+
+	// Handle other messages (e.g. from SetItems command)
+	var cmd tea.Cmd
+	m.projectList, cmd = m.projectList.Update(msg)
+	return m, cmd
 }
 
 // --- UPDATE LOGIC HANDLERS ---
 
 func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	// Global keys
 	if msg.String() == "ctrl+c" || msg.String() == "q" {
 		return m, tea.Quit
@@ -114,7 +121,8 @@ func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Trigger search
 	if msg.String() == "/" && m.projectList.FilterState() == list.Unfiltered {
-		m.switchToSearchItems()
+		cmd := m.switchToSearchItems()
+		cmds = append(cmds, cmd)
 	}
 
 	// Application keys (only when not filtering)
@@ -169,13 +177,15 @@ func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.projectList, cmd = m.projectList.Update(msg)
+	cmds = append(cmds, cmd)
 
 	// If we just stopped filtering (e.g. user pressed Esc), restore project items
 	if wasFiltering && m.projectList.FilterState() == list.Unfiltered {
-		m.updateProjectListItems()
+		cmd := m.updateProjectListItems()
+		cmds = append(cmds, cmd)
 	}
 
-	return m, cmd
+	return m, tea.Batch(cmds...)
 }
 
 func (m *model) updateProjectMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -231,13 +241,14 @@ func (m *model) updateColorList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.projects[m.selectedProject].Colors) > 0 {
 			deletedColor := m.projects[m.selectedProject].Colors[m.cursor]
 			m.projects[m.selectedProject].Colors = append(m.projects[m.selectedProject].Colors[:m.cursor], m.projects[m.selectedProject].Colors[m.cursor+1:]...)
-			m.updateProjectListItems()
+			cmd := m.updateProjectListItems()
 			m.saveProjects()
 			m.message = fmt.Sprintf("Deleted color %s", deletedColor)
 
 			if m.cursor > 0 && m.cursor >= len(m.projects[m.selectedProject].Colors) {
 				m.cursor--
 			}
+			return m, cmd
 		}
 	case "n":
 		m.currentView = AddColorView
@@ -274,13 +285,14 @@ func (m *model) updateUrlList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.projects[m.selectedProject].Urls) > 0 {
 			deletedUrl := m.projects[m.selectedProject].Urls[m.cursor].Name
 			m.projects[m.selectedProject].Urls = append(m.projects[m.selectedProject].Urls[:m.cursor], m.projects[m.selectedProject].Urls[m.cursor+1:]...)
-			m.updateProjectListItems()
+			cmd := m.updateProjectListItems()
 			m.saveProjects()
 			m.message = fmt.Sprintf("Deleted URL '%s'", deletedUrl)
 
 			if m.cursor > 0 && m.cursor >= len(m.projects[m.selectedProject].Urls) {
 				m.cursor--
 			}
+			return m, cmd
 		}
 	case "n":
 		m.currentView = AddUrlView
@@ -301,10 +313,11 @@ func (m *model) updateAddProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.inputBuffer != "" {
 			m.projects = append(m.projects, Project{Name: m.inputBuffer, Colors: []string{}, Urls: []namedURL{}})
-			m.updateProjectListItems()
+			cmd := m.updateProjectListItems()
 			m.saveProjects()
 			m.currentView = ProjectListView
 			m.inputBuffer = ""
+			return m, cmd
 		}
 	case "backspace":
 		m.inputBuffer = deleteLastRune(m.inputBuffer)
@@ -328,11 +341,12 @@ func (m *model) updateAddColor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.inputBuffer != "" && strings.HasPrefix(m.inputBuffer, "#") && (len(m.inputBuffer) == 7 || len(m.inputBuffer) == 4) {
 			m.projects[m.selectedProject].Colors = append(m.projects[m.selectedProject].Colors, m.inputBuffer)
-			m.updateProjectListItems()
+			cmd := m.updateProjectListItems()
 			m.saveProjects()
 			m.currentView = ColorListView
 			m.cursor = len(m.projects[m.selectedProject].Colors) - 1
 			m.inputBuffer = ""
+			return m, cmd
 		}
 	case "backspace":
 		m.inputBuffer = deleteLastRune(m.inputBuffer)
@@ -359,13 +373,14 @@ func (m *model) updateAddUrl(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if m.urlNameBuffer != "" && m.inputBuffer != "" {
 				m.projects[m.selectedProject].Urls = append(m.projects[m.selectedProject].Urls, namedURL{Name: m.urlNameBuffer, URL: m.inputBuffer})
-				m.updateProjectListItems()
+				cmd := m.updateProjectListItems()
 				m.saveProjects()
 				m.currentView = UrlListView
 				m.cursor = len(m.projects[m.selectedProject].Urls) - 1
 				m.urlNameBuffer = ""
 				m.inputBuffer = ""
 				m.focusedField = 0
+				return m, cmd
 			}
 		}
 	case "backspace":
@@ -400,9 +415,11 @@ func (m *model) updateConfirmDeleteProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		if m.selectedProject >= 0 && m.selectedProject < len(m.projects) {
 			deletedProjectName := m.projects[m.selectedProject].Name
 			m.projects = append(m.projects[:m.selectedProject], m.projects[m.selectedProject+1:]...)
-			m.updateProjectListItems()
+			cmd := m.updateProjectListItems()
 			m.saveProjects()
 			m.message = fmt.Sprintf("Deleted project '%s'", deletedProjectName)
+			m.currentView = ProjectListView
+			return m, cmd
 		}
 		m.currentView = ProjectListView
 	case "n", "esc":
