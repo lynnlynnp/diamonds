@@ -125,17 +125,10 @@ func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 
-	// Application keys (only when not filtering)
-	if m.projectList.FilterState() == list.Unfiltered {
-		switch msg.String() {
-		case "esc":
-			// No-op here because if we are Unfiltered, we don't need to reset filter.
-		case "enter":
-			selectedItem := m.projectList.SelectedItem()
-			if selectedItem == nil {
-				return m, nil
-			}
-
+	// Handle selection (Enter) regardless of filter state
+	if msg.String() == "enter" {
+		selectedItem := m.projectList.SelectedItem()
+		if selectedItem != nil {
 			switch item := selectedItem.(type) {
 			case *projectItem:
 				for i, p := range m.projects {
@@ -154,6 +147,14 @@ func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.url.URL)
 			}
 			return m, nil
+		}
+	}
+
+	// Application keys (only when not filtering)
+	if m.projectList.FilterState() == list.Unfiltered {
+		switch msg.String() {
+		case "esc":
+			// No-op here because if we are Unfiltered, we don't need to reset filter.
 		case "n":
 			m.currentView = AddProjectView
 			m.inputBuffer = ""
