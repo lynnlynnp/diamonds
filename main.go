@@ -1,441 +1,384 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"unicode/utf8"
+	"sync"
+
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/atotto/clipboard"
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
+	"github.com/pkg/browser"
 )
 
-// --- MAIN STATE MODEL ---
+const dataFile = "items.json"
+
+type styles struct {
+	app           lipgloss.Style
+	title         lipgloss.Style
+	statusMessage lipgloss.Style
+	focusedPrompt lipgloss.Style
+	blurredPrompt lipgloss.Style
+}
+
+func newStyles(darkBG bool) styles {
+	lightDark := lipgloss.LightDark(darkBG)
+
+	return styles{
+		app: lipgloss.NewStyle().
+			Padding(1, 2),
+		title: lipgloss.NewStyle().
+			Foreground(lightDark(lipgloss.Color("#1E90FF"), lipgloss.Color("#F6FFFE"))).
+			Bold(true).
+			Padding(0, 0),
+		statusMessage: lipgloss.NewStyle().
+			Foreground(lightDark(lipgloss.Color("#04B575"), lipgloss.Color("#04B575"))),
+		focusedPrompt: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("205")),
+		blurredPrompt: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")),
+	}
+}
+
+// --- Data Structure ---
+
+type item struct {
+	NameValue   string `json:"name"`
+	TargetValue string `json:"target"`
+	ItemType    string `json:"type"`
+}
+
+func (i item) Title() string       { return i.NameValue }
+func (i item) Description() string { return fmt.Sprintf("[%s] %s", i.ItemType, i.TargetValue) }
+func (i item) FilterValue() string { return i.NameValue }
+
+// --- Persistence Helpers ---
+
+func loadList() []list.Item {
+	b, err := os.ReadFile(dataFile)
+	if err != nil {
+		return []list.Item{}
+	}
+
+	var savedItems []item
+	if err := json.Unmarshal(b, &savedItems); err != nil {
+		return []list.Item{}
+	}
+
+	items := make([]list.Item, len(savedItems))
+	for i, itm := range savedItems {
+		items[i] = itm
+	}
+	return items
+}
+
+func saveList(items []list.Item) {
+	var toSave []item
+	for _, i := range items {
+		if itm, ok := i.(item); ok {
+			toSave = append(toSave, itm)
+		}
+	}
+
+	b, err := json.MarshalIndent(toSave, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(dataFile, b, 0644)
+	}
+}
+
+// --- Key Bindings ---
+
+type listKeyMap struct {
+	togglePagination key.Binding
+	toggleHelpMenu   key.Binding
+	insertItem       key.Binding
+	copyValue        key.Binding // Added: Copy Binding
+	openUrl          key.Binding // Added: Open Browser Binding
+}
+
+func newListKeyMap() *listKeyMap {
+	return &listKeyMap{
+		insertItem:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add item")),
+		togglePagination: key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "toggle pagination")),
+		toggleHelpMenu:   key.NewBinding(key.WithKeys("H"), key.WithHelp("H", "toggle help")),
+		copyValue:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy value")),
+		openUrl:          key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "open url")),
+	}
+}
+
+// --- Main Model ---
 
 type model struct {
-	projectList     list.Model
-	projects        []Project
-	currentView     ViewState
-	cursor          int
-	selectedProject int
-	inputBuffer     string // Used for single-line inputs
-	urlNameBuffer   string // Used for the URL name in AddUrlView
-	focusedField    int    // Used in AddUrlView to track focus
-	message         string
+	styles        styles
+	darkBG        bool
+	width, height int
+	once          *sync.Once
+	list          list.Model
+	keys          *listKeyMap
+
+	// Form State
+	inputs     []textinput.Model
+	focusIndex int
+	addingItem bool
 }
 
-// --- HELPER FUNCTIONS ---
-
-// deleteLastRune removes the last character from a string, handling unicode characters correctly.
-func deleteLastRune(s string) string {
-	_, size := utf8.DecodeLastRuneInString(s)
-	return s[:len(s)-size]
+func (m model) Init() tea.Cmd {
+	return tea.Batch(
+		tea.RequestBackgroundColor,
+		textinput.Blink,
+	)
 }
 
-// --- INITIALIZATION ---
+func (m *model) updateListProperties() {
+	h, v := m.styles.app.GetFrameSize()
+	m.list.SetSize(m.width-h, m.height-v)
+	m.styles = newStyles(m.darkBG)
+	m.list.Styles.Title = m.styles.title
+}
 
-func initialModel() model {
-	loadedProjects, err := loadProjects()
-	if err != nil {
-		fmt.Printf("Error loading projects: %v\n", err)
-		os.Exit(1)
-	}
-
-	items := make([]list.Item, len(loadedProjects))
-	for i, project := range loadedProjects {
-		items[i] = &projectItem{project: project}
-	}
-
-	delegate := newCustomDelegate()
-	l := list.New(items, delegate, 0, 0)
-	l.Title = "🪩 DIAMONDS "
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
-	l.Styles.Title = headerStyle.MarginTop(0).PaddingTop(1)
-	l.Styles.HelpStyle = helpStyle
-	l.SetShowHelp(false)
-
-	return model{
-		projectList: l,
-		projects:    loadedProjects,
-		currentView: ProjectListView,
+func (m *model) resetForm() {
+	m.addingItem = false
+	m.focusIndex = 0
+	for i := range m.inputs {
+		m.inputs[i].SetValue("")
+		if i == 0 {
+			m.inputs[i].Focus()
+		} else {
+			m.inputs[i].Blur()
+		}
 	}
 }
 
-func (m *model) Init() tea.Cmd {
-	return nil
-}
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 
-// --- UPDATE LOOP ---
+	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		m.darkBG = msg.IsDark()
+		m.updateListProperties()
+		return m, nil
 
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Clear the message on any key press
-	if _, ok := msg.(tea.KeyMsg); ok {
-		m.message = ""
-	}
-
-	if msg, ok := msg.(tea.WindowSizeMsg); ok {
-		h, v := docStyle.GetHorizontalPadding(), docStyle.GetVerticalPadding()
-		m.projectList.SetSize(msg.Width-h, msg.Height-v)
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.updateListProperties()
 		return m, nil
 	}
 
+	// --- 1. Form Mode (Adding a new item) ---
+	if m.addingItem {
+		switch msg := msg.(type) {
+		case tea.KeyPressMsg:
+			switch msg.String() {
+			case "esc":
+				m.resetForm()
+				return m, nil
+
+			case "tab", "shift+tab", "enter", "up", "down":
+				s := msg.String()
+
+				// If Enter is pressed on the LAST input field, submit the form!
+				if s == "enter" && m.focusIndex == len(m.inputs)-1 {
+					name := strings.TrimSpace(m.inputs[0].Value())
+					val := strings.TrimSpace(m.inputs[1].Value())
+
+					if name != "" && val != "" {
+						// Auto-detect type based on the value
+						itemType := "TEXT"
+						lowerVal := strings.ToLower(val)
+						if strings.HasPrefix(lowerVal, "http://") || strings.HasPrefix(lowerVal, "https://") {
+							itemType = "URL"
+						} else if strings.HasPrefix(val, "#") {
+							itemType = "HEX"
+						}
+
+						newItem := item{
+							NameValue:   name,
+							TargetValue: val,
+							ItemType:    itemType,
+						}
+
+						insCmd := m.list.InsertItem(0, newItem)
+						statusCmd := m.list.NewStatusMessage(m.styles.statusMessage.Render("Added " + newItem.Title()))
+						cmds = append(cmds, insCmd, statusCmd)
+
+						saveList(m.list.Items())
+					}
+					
+					m.resetForm()
+					return m, tea.Batch(cmds...)
+				}
+
+				// Cycle focus logic
+				if s == "up" || s == "shift+tab" {
+					m.focusIndex--
+				} else {
+					m.focusIndex++
+				}
+
+				if m.focusIndex > len(m.inputs)-1 {
+					m.focusIndex = 0
+				} else if m.focusIndex < 0 {
+					m.focusIndex = len(m.inputs) - 1
+				}
+
+				for i := 0; i <= len(m.inputs)-1; i++ {
+					if i == m.focusIndex {
+						cmds = append(cmds, m.inputs[i].Focus())
+						continue
+					}
+					m.inputs[i].Blur()
+				}
+				return m, tea.Batch(cmds...)
+			}
+		}
+
+		// Safely append commands to the slice instead of indexing directly
+		var cmd tea.Cmd
+		for i := range m.inputs {
+			m.inputs[i], cmd = m.inputs[i].Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	// --- 2. List Mode ---
+	preLen := len(m.list.Items())
+
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch m.currentView {
-		case ProjectListView:
-			return m.updateProjectList(msg)
-		case ProjectMenuView:
-			return m.updateProjectMenu(msg)
-		case ColorListView:
-			return m.updateColorList(msg)
-		case UrlListView:
-			return m.updateUrlList(msg)
-		case AddProjectView:
-			return m.updateAddProject(msg)
-		case AddColorView:
-			return m.updateAddColor(msg)
-		case AddUrlView:
-			return m.updateAddUrl(msg)
-		case ConfirmDeleteProjectView:
-			return m.updateConfirmDeleteProject(msg)
+	case tea.KeyPressMsg:
+		if m.list.FilterState() == list.Filtering {
+			break
 		}
-	}
 
-	// Handle other messages (e.g. from SetItems command)
-	var cmd tea.Cmd
-	m.projectList, cmd = m.projectList.Update(msg)
-	return m, cmd
-}
+		switch {
+		case key.Matches(msg, m.keys.togglePagination):
+			m.list.SetShowPagination(!m.list.ShowPagination())
+			return m, nil
 
-// --- UPDATE LOGIC HANDLERS ---
+		case key.Matches(msg, m.keys.toggleHelpMenu):
+			m.list.SetShowHelp(!m.list.ShowHelp())
+			return m, nil
 
-func (m *model) updateProjectList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
+		case key.Matches(msg, m.keys.insertItem):
+			m.addingItem = true
+			return m, textinput.Blink
 
-	// Global keys
-	if msg.String() == "ctrl+c" || msg.String() == "q" {
-		return m, tea.Quit
-	}
-
-	// Trigger search
-	if msg.String() == "/" && m.projectList.FilterState() == list.Unfiltered {
-		cmd := m.switchToSearchItems()
-		cmds = append(cmds, cmd)
-	}
-
-	// Handle selection (Enter) regardless of filter state
-	if msg.String() == "enter" {
-		selectedItem := m.projectList.SelectedItem()
-		if selectedItem != nil {
-			switch item := selectedItem.(type) {
-			case *projectItem:
-				for i, p := range m.projects {
-					if p.Name == item.project.Name {
-						m.selectedProject = i
-						m.currentView = ProjectMenuView
-						m.cursor = 0
-						break
-					}
-				}
-			case *colorItem:
-				clipboard.WriteAll(item.color)
-				m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.color)
-			case *urlItem:
-				clipboard.WriteAll(item.url.URL)
-				m.message = fmt.Sprintf(" Copied %s to clipboard! ", item.url.URL)
+		// --- NEW: Copy Value ---
+		case key.Matches(msg, m.keys.copyValue):
+		    if i, ok := m.list.SelectedItem().(item); ok {
+			// We copy if it's URL or HEX as requested
+			if i.ItemType == "URL" || i.ItemType == "HEX" {
+			    _ = clipboard.WriteAll(i.TargetValue)
+			    cmd := m.list.NewStatusMessage(m.styles.statusMessage.Render(fmt.Sprintf("Copied %s %s to clipboard", i.NameValue, i.ItemType)))
+			    return m, cmd
 			}
-			return m, nil
-		}
-	}
+		    }
 
-	// Application keys (only when not filtering)
-	if m.projectList.FilterState() == list.Unfiltered {
-		switch msg.String() {
-		case "esc":
-			// No-op here because if we are Unfiltered, we don't need to reset filter.
-		case "n":
-			m.currentView = AddProjectView
-			m.inputBuffer = ""
-			return m, nil
-		case "d":
-			selectedItem, ok := m.projectList.SelectedItem().(*projectItem)
-			if ok {
-				for i, p := range m.projects {
-					if p.Name == selectedItem.project.Name {
-						m.selectedProject = i
-						m.currentView = ConfirmDeleteProjectView
-						break
-					}
+	 	// --- NEW: Open URL ---
+		case key.Matches(msg, m.keys.openUrl):
+			if i, ok := m.list.SelectedItem().(item); ok {
+				// Only URLs trigger the browser
+				if i.ItemType == "URL" {
+					_ = browser.OpenURL(i.TargetValue)
+					cmd := m.list.NewStatusMessage(m.styles.statusMessage.Render("Opening in browser: " + i.TargetValue))
+					return m, cmd
 				}
 			}
-			return m, nil
 		}
 	}
 
-	wasFiltering := m.projectList.FilterState() == list.Filtering
-
-	var cmd tea.Cmd
-	m.projectList, cmd = m.projectList.Update(msg)
+	newListModel, cmd := m.list.Update(msg)
+	m.list = newListModel
 	cmds = append(cmds, cmd)
 
-	// If we just stopped filtering (e.g. user pressed Esc), restore project items
-	if wasFiltering && m.projectList.FilterState() == list.Unfiltered {
-		cmd := m.updateProjectListItems()
-		cmds = append(cmds, cmd)
+	if len(m.list.Items()) != preLen {
+		saveList(m.list.Items())
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
-func (m *model) updateProjectMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = ProjectListView
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < 1 {
-			m.cursor++
-		}
-	case "enter":
-		if m.cursor == 0 {
-			m.currentView = ColorListView
-		} else {
-			m.currentView = UrlListView
-		}
-		m.cursor = 0
-	}
-	return m, nil
-}
+func (m model) View() tea.View {
+	var content string
 
-func (m *model) updateColorList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = ProjectMenuView
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(m.projects[m.selectedProject].Colors)-1 {
-			m.cursor++
-		}
-	case "enter":
-		if len(m.projects[m.selectedProject].Colors) > 0 {
-			color := m.projects[m.selectedProject].Colors[m.cursor]
-			err := clipboard.WriteAll(color)
-			if err != nil {
-				m.message = fmt.Sprintf("Error copying to clipboard: %v", err)
-			} else {
-				m.message = fmt.Sprintf(" Copied %s to clipboard! ", color)
+	if m.addingItem {
+		var b strings.Builder
+		b.WriteString(m.styles.title.Render(" Add New Item ") + "\n\n")
+
+		for i := range m.inputs {
+			b.WriteString(m.inputs[i].View())
+			if i < len(m.inputs)-1 {
+				b.WriteRune('\n')
 			}
 		}
-	case "d":
-		if len(m.projects[m.selectedProject].Colors) > 0 {
-			deletedColor := m.projects[m.selectedProject].Colors[m.cursor]
-			m.projects[m.selectedProject].Colors = append(m.projects[m.selectedProject].Colors[:m.cursor], m.projects[m.selectedProject].Colors[m.cursor+1:]...)
-			cmd := m.updateProjectListItems()
-			m.saveProjects()
-			m.message = fmt.Sprintf("Deleted color %s", deletedColor)
-
-			if m.cursor > 0 && m.cursor >= len(m.projects[m.selectedProject].Colors) {
-				m.cursor--
-			}
-			return m, cmd
-		}
-	case "n":
-		m.currentView = AddColorView
-		m.inputBuffer = ""
+		b.WriteString("\n\n(Tab to switch fields, Enter to save, Esc to cancel)")
+		content = b.String()
+	} else {
+		content = m.list.View()
 	}
-	return m, nil
+
+	v := tea.NewView(m.styles.app.Render(content))
+	v.AltScreen = true
+	return v
 }
 
-func (m *model) updateUrlList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "q":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = ProjectMenuView
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(m.projects[m.selectedProject].Urls)-1 {
-			m.cursor++
-		}
-	case "enter":
-		if len(m.projects[m.selectedProject].Urls) > 0 {
-			url := m.projects[m.selectedProject].Urls[m.cursor].URL
-			err := clipboard.WriteAll(url)
-			if err != nil {
-				m.message = fmt.Sprintf("Error copying to clipboard: %v", err)
-			} else {
-				m.message = fmt.Sprintf(" Copied %s to clipboard! ", url)
-			}
-		}
-	case "d":
-		if len(m.projects[m.selectedProject].Urls) > 0 {
-			deletedUrl := m.projects[m.selectedProject].Urls[m.cursor].Name
-			m.projects[m.selectedProject].Urls = append(m.projects[m.selectedProject].Urls[:m.cursor], m.projects[m.selectedProject].Urls[m.cursor+1:]...)
-			cmd := m.updateProjectListItems()
-			m.saveProjects()
-			m.message = fmt.Sprintf("Deleted URL '%s'", deletedUrl)
+func initialModel() model {
+	m := model{}
+	m.styles = newStyles(false)
 
-			if m.cursor > 0 && m.cursor >= len(m.projects[m.selectedProject].Urls) {
-				m.cursor--
-			}
-			return m, cmd
+	listKeys := newListKeyMap()
+
+	// Initialize the Multi-Input Form
+	m.inputs = make([]textinput.Model, 2)
+	for i := range m.inputs {
+		t := textinput.New()
+		t.CharLimit = 156
+		t.SetWidth(40)
+
+		switch i {
+		case 0:
+			t.Placeholder = "Item Name (e.g. Dashboard)"
+			t.Focus()
+		case 1:
+			t.Placeholder = "Value (e.g. https://... or #FF0000)"
 		}
-	case "n":
-		m.currentView = AddUrlView
-		m.inputBuffer = ""
-		m.urlNameBuffer = ""
-		m.focusedField = 0
+		m.inputs[i] = t
 	}
-	return m, nil
-}
 
-func (m *model) updateAddProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = ProjectListView
-		m.inputBuffer = ""
-	case "enter":
-		if m.inputBuffer != "" {
-			m.projects = append(m.projects, Project{Name: m.inputBuffer, Colors: []string{}, Urls: []namedURL{}})
-			cmd := m.updateProjectListItems()
-			m.saveProjects()
-			m.currentView = ProjectListView
-			m.inputBuffer = ""
-			return m, cmd
-		}
-	case "backspace":
-		m.inputBuffer = deleteLastRune(m.inputBuffer)
-	case " ":
-		m.inputBuffer += " "
-	default:
-		if msg.Type == tea.KeyRunes {
-			m.inputBuffer += string(msg.Runes)
+	items := loadList()
+	delegate := list.NewDefaultDelegate()
+	
+	mainList := list.New(items, delegate, 0, 0)
+	mainList.Title = "🪩 DIAMONDS"
+	mainList.SetShowStatusBar(false)
+	mainList.Styles.Title = m.styles.title
+	
+	// Ensure the new keys show up in the help menu
+	mainList.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			listKeys.insertItem,
+			listKeys.copyValue,
+			listKeys.openUrl,
+			listKeys.togglePagination,
+			listKeys.toggleHelpMenu,
 		}
 	}
-	return m, nil
-}
 
-func (m *model) updateAddColor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = ColorListView
-		m.inputBuffer = ""
-	case "enter":
-		if m.inputBuffer != "" && strings.HasPrefix(m.inputBuffer, "#") && (len(m.inputBuffer) == 7 || len(m.inputBuffer) == 4) {
-			m.projects[m.selectedProject].Colors = append(m.projects[m.selectedProject].Colors, m.inputBuffer)
-			cmd := m.updateProjectListItems()
-			m.saveProjects()
-			m.currentView = ColorListView
-			m.cursor = len(m.projects[m.selectedProject].Colors) - 1
-			m.inputBuffer = ""
-			return m, cmd
-		}
-	case "backspace":
-		m.inputBuffer = deleteLastRune(m.inputBuffer)
-	default:
-		if msg.Type == tea.KeyRunes && len(m.inputBuffer) < 7 {
-			m.inputBuffer += string(msg.Runes)
-		}
-	}
-	return m, nil
-}
+	m.list = mainList
+	m.keys = listKeys
 
-func (m *model) updateAddUrl(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "esc":
-		m.currentView = UrlListView
-		m.urlNameBuffer = ""
-		m.inputBuffer = ""
-		m.focusedField = 0
-	case "enter":
-		if m.focusedField == 0 {
-			m.focusedField = 1
-		} else {
-			if m.urlNameBuffer != "" && m.inputBuffer != "" {
-				m.projects[m.selectedProject].Urls = append(m.projects[m.selectedProject].Urls, namedURL{Name: m.urlNameBuffer, URL: m.inputBuffer})
-				cmd := m.updateProjectListItems()
-				m.saveProjects()
-				m.currentView = UrlListView
-				m.cursor = len(m.projects[m.selectedProject].Urls) - 1
-				m.urlNameBuffer = ""
-				m.inputBuffer = ""
-				m.focusedField = 0
-				return m, cmd
-			}
-		}
-	case "backspace":
-		if m.focusedField == 0 {
-			m.urlNameBuffer = deleteLastRune(m.urlNameBuffer)
-		} else {
-			m.inputBuffer = deleteLastRune(m.inputBuffer)
-		}
-	case "tab":
-		m.focusedField = (m.focusedField + 1) % 2
-	case " ":
-		if m.focusedField == 0 {
-			m.urlNameBuffer += " "
-		} else {
-			m.inputBuffer += " "
-		}
-	default:
-		if msg.Type == tea.KeyRunes {
-			if m.focusedField == 0 {
-				m.urlNameBuffer += string(msg.Runes)
-			} else {
-				m.inputBuffer += string(msg.Runes)
-			}
-		}
-	}
-	return m, nil
+	return m
 }
-
-func (m *model) updateConfirmDeleteProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y":
-		if m.selectedProject >= 0 && m.selectedProject < len(m.projects) {
-			deletedProjectName := m.projects[m.selectedProject].Name
-			m.projects = append(m.projects[:m.selectedProject], m.projects[m.selectedProject+1:]...)
-			cmd := m.updateProjectListItems()
-			m.saveProjects()
-			m.message = fmt.Sprintf("Deleted project '%s'", deletedProjectName)
-			m.currentView = ProjectListView
-			return m, cmd
-		}
-		m.currentView = ProjectListView
-	case "n", "esc":
-		m.currentView = ProjectListView
-	}
-	return m, nil
-}
-
-// --- ENTRY POINT ---
 
 func main() {
-	m := initialModel()
-	p := tea.NewProgram(&m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Error running program: %v", err)
+	if _, err := tea.NewProgram(initialModel()).Run(); err != nil {
+		fmt.Println("Error running program:", err)
 		os.Exit(1)
 	}
 }
